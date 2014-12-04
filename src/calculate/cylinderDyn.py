@@ -2,17 +2,13 @@
 from ase import *
 from hotbit import *
 import numpy as np
-from ase.lattice.surface import fcc111
 from ase.optimize import BFGS
-#from ase import io
-#from ase.visualize import view
 from ase.io import PickleTrajectory
-#from ase import units
 from ase.md.langevin import Langevin
 from ase.md import MDLogger
-from aid import checkAndCreateFolder
+from aid import checkAndCreateFolder, get_opmAtomsFlat
 from ase.visualize import view
-#mdsteps =   10
+
 
 
 
@@ -34,33 +30,72 @@ def trajToExtTraj(traj, n, *args):
         traj_ext.write(atoms.extended_copy(n))
 
 
+
+        
 def cylinderDynamics(R, T, params):
     
-    d       =   params['d']         #2.934
     nk      =   params['nk']        #20
     fmax    =   params['fmax']      #1E-2
-    fric    =   params['fric']      #0.002        # equilibration time tau = 10 fs/fric (= mdsteps*dt) 
+    fric    =   params['fric']      #0.002         
     dt      =   params['dt']        #5.0
     mdsteps =   params['mdsteps']   #int(10/fric/dt)
-    path    =   params['path'] #'/space/tohekorh/Au_bend/files/'
+    path    =   params['path']      #'/space/tohekorh/Au_bend/files/'
     
-    print 'radius',R
+    print 'radius',R, '\n'
     name    =   '%.1f' %R
     
-    #
-    
-    atoms       =   fcc111('Au',size=(2,2,1),a=np.sqrt(2)*d)
+    # Get the optimal flat atoms , unit-cell config for this temperature:
+    atoms       =   get_opmAtomsFlat(T, params)
+
+    # Take the diagonal of the cell:
     L           =   atoms.get_cell().diagonal()
-    
+
+     
     atoms.set_cell(L) 
     
+    # The wedge angle is:
     angle       =   L[1]/R
+    
+    # fiddle with atoms:
     atoms.rotate('y', np.pi/2)
     atoms.translate((-atoms[0].x, 0, 0) )
-    atoms.translate((R,0,0))
-    atoms       =   Atoms(atoms=atoms,container='Wedge')
-    atoms.set_container(angle=angle,height=L[0],physical=False,pbcz=True)
-    #view(atoms.extended_copy((8,1,2)))
+    
+    #view(atoms)
+    
+    # Initial map for atoms, to get the on surface of cylinder:
+    phi_max     =   angle
+    for a in atoms:
+        r0      =   a.position
+        phi     =   r0[1]/L[1]*phi_max
+        a.position[0]   =   R*np.cos(phi)
+        a.position[1]   =   R*np.sin(phi)
+
+    #view(atoms)
+    
+    # proper number of kappa points in angle direction, if angle >= 2*pi/3 the use genuine 
+    # physical boundary conditions and proper kappa-points. With 64 atoms in unit cell souhld not 
+    # happen as the radius -> very small if angle = 2*pi/3 or larger.
+    
+    # Check that the unit-cell angle is 2*pi/integer. This can be removed! 
+    if (2*np.pi/angle)%1 > 0:
+        raise 
+    
+    # This does not have any effect unless angle >= 2*pi/3:
+    m           =   int(round(2*np.pi/angle))
+    physical    =   False
+    if m <= 3:
+        nk1 =   m
+        physical = True
+    else:
+        nk1     =   nk
+    
+    # Set up the wedge container:
+    atoms       =   Atoms(atoms = atoms, container = 'Wedge')
+    atoms.set_container(angle = angle, height = L[0], physical = physical, pbcz = True)
+    
+    # Check that everything looks good:
+    #view(atoms.extended_copy((2,1,2)))
+    
     
     # FOLDERS
     path_opm    =   path + 'cylinder/opm/T=%.0f/' %T
@@ -69,21 +104,22 @@ def cylinderDynamics(R, T, params):
     checkAndCreateFolder(path_opm)
     checkAndCreateFolder(path_md)
     
-    # proper number of kappa points in angle
-    m           =   int( round(2*np.pi/angle) )
+    
     # CALCULATOR
-    calc        =   Hotbit(SCC=False, kpts=(m,1,nk), \
+    calc        =   Hotbit(SCC=False, kpts=(nk1, 1, nk), physical_k = physical, \
                     txt= path_opm + 'optimization_%s.cal' %name)
     atoms.set_calculator(calc)
     
-    opt         =   BFGS(atoms,trajectory= path_opm + 'optimization_%s.traj' %name)
-    opt.run(fmax=fmax,steps=300)
+    # RELAX
+    opt         =   BFGS(atoms, trajectory= path_opm + 'optimization_%s.traj' %name)
+    opt.run(fmax=fmax, steps=1000)
     
     
     # DYNAMICS
     traj        =   PickleTrajectory(path_md + 'md_R%.3f.traj' %R,'w',atoms)   
     
-    dyn         =   Langevin(atoms, dt*units.fs, units.kB*T,fric)
+    # Perform dynamics
+    dyn         =   Langevin(atoms, dt*units.fs, units.kB*T, fric)
     dyn.attach(MDLogger(dyn, atoms, path_md + 'md_R%.3f.log' %R, header=True, stress=False,
            peratom=True, mode="w"), interval = 1)
     
@@ -91,17 +127,10 @@ def cylinderDynamics(R, T, params):
     dyn.run(mdsteps)
     traj.close()
     
-    # load the dynamics back..
+    # load the dynamics back, to make exteded trajectory:
     traj        =   PickleTrajectory(path_md + 'md_R%.3f.traj' %R)
-    trajToExtTraj(traj, (4, 1, 2), R, T, angle, L[0], path)
+    trajToExtTraj(traj, (2, 1, 2), R, T, angle, L[0], path)
     
-    #cohesion    =   np.mean([atoms.get_potential_energy() / len(atoms) for atoms in traj]) 
-    
-    #cohesion    =   atoms.get_potential_energy()/len(atoms)
-    #atoms2      =   atoms.extended_copy((2,2,1))
-    #view(atoms2)
-    
-    #return cohesion
     
     
     
